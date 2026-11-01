@@ -22,7 +22,11 @@ def process_article(slug, is_download=False):
     title_tag = soup.find('title')
     page_name = title_tag.text if title_tag else slug.replace('_', ' ')
     
-    # 0. Adjust Title tag to prepend "SpokenView:"
+    # 0. Adjust Title tag to prepend "SpokenView:" and remove <base> tag
+    base_tag = soup.find('base')
+    if base_tag:
+        base_tag.decompose()
+
     if title_tag:
         title_tag.string = f"SpokenView: {page_name}"
     else:
