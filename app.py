@@ -53,8 +53,8 @@ def process_article(slug, is_download=False):
         if el:
             el.decompose()
 
-    # 2. Strip unwanted sections (See also, Notes, References, External links)
-    sections_to_remove = ['see also', 'notes', 'references', 'external links']
+    # 2. Strip unwanted sections (See also, Notes, References, External links, Further reading)
+    sections_to_remove = ['see also', 'notes', 'references', 'external links', 'further reading']
     for heading in soup.find_all(['h2', 'h3', 'h4']):
         heading_text = heading.get_text().strip().lower()
         if heading_text in sections_to_remove:
