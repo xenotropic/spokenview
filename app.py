@@ -62,12 +62,10 @@ def process_article(slug, is_download=False):
     for heading in soup.find_all(['h2', 'h3', 'h4']):
         heading_text = heading.get_text().strip().lower()
         if heading_text in sections_to_remove:
-            # The Wikipedia Parsoid API wraps semantic chunks inside <section> tags
             parent_section = heading.find_parent('section')
             if parent_section:
                 parent_section.decompose()
             else:
-                # Fallback: remove heading and everything until the next heading
                 curr = heading.find_next_sibling()
                 heading.decompose()
                 while curr and curr.name not in ['h1', 'h2', 'h3', 'h4']:
@@ -115,13 +113,45 @@ def process_article(slug, is_download=False):
     preamble.string = f"This is the Spoken Wikipedia article on {page_name} read aloud by Wikipedia user __________"
     body.insert(0, preamble)
 
-    # 8. Inject Spoken Wikipedia outro
+    # 8. Generate Top-Level Table of Contents (H2 only)
+    h2_tags = soup.find_all('h2')
+    if h2_tags:
+        toc_container = soup.new_tag('div')
+        toc_container['style'] = "background: #f8f9fa; padding: 15px; margin: 20px 0; border: 1px solid #a2a9b1; border-radius: 2px;"
+        
+        toc_title = soup.new_tag('h2')
+        toc_title.string = "Contents"
+        toc_title['style'] = "margin-top: 0; font-size: 1.2em; border-bottom: none;"
+        toc_container.append(toc_title)
+        
+        toc_list = soup.new_tag('ul')
+        toc_list['style'] = "list-style-type: none; padding-left: 0; margin-bottom: 0;"
+        
+        for idx, h2 in enumerate(h2_tags):
+            if not h2.get('id'):
+                h2['id'] = f"spoken-section-{idx}"
+            
+            li = soup.new_tag('li')
+            li['style'] = "margin-bottom: 6px;"
+            
+            a_tag = soup.new_tag('a')
+            a_tag['href'] = f"#{h2.get('id')}"
+            a_tag['style'] = "text-decoration: none; color: #0645ad; font-weight: bold;"
+            a_tag.string = h2.get_text().strip()
+            
+            li.append(a_tag)
+            toc_list.append(li)
+            
+        toc_container.append(toc_list)
+        preamble.insert_after(toc_container)
+
+    # 9. Inject Spoken Wikipedia outro
     outro = soup.new_tag('p')
     outro['style'] = "font-style: italic; font-size: 1.1em; background: #e0f2fe; padding: 15px; border-radius: 5px; margin-top: 40px;"
     outro.string = "This recording and the underlying text are available under the Creative Commons Attribution Share Alike 4.0 license. Additional terms may apply."
     body.append(outro)
 
-    # 9. Inject base typography 
+    # 10. Inject base typography 
     head = soup.find('head')
     if not head:
         head = soup.new_tag('head')
@@ -135,7 +165,7 @@ def process_article(slug, is_download=False):
     """
     head.append(style)
 
-    # 10. Inject floating save button (only for live view)
+    # 11. Inject floating save button (only for live view)
     if not is_download:
         ui_html = f"""
         <div id="spoken-view-ui" style="position: fixed; bottom: 20px; right: 20px; background: #fff; padding: 15px; border: 1px solid #ccc; box-shadow: 0 4px 6px rgba(0,0,0,0.1); z-index: 9999;">
@@ -164,7 +194,7 @@ def index():
             <h1>Spoken View</h1>
             <p>Enter an English Wikipedia article URL or exact name to generate a clutter-free, read-aloud version.</p>
             <form method="POST">
-                <input type="text" name="wiki_input" placeholder="e.g., Cat or https://en.wikipedia.org/wiki/Cat" style="width: 100%; padding: 10px; margin-bottom: 10px;" required>
+                <input type="text" name="wiki_input" placeholder="e.g., Bicycle or https://en.wikipedia.org/wiki/Bicycle" style="width: 100%; padding: 10px; margin-bottom: 10px;" required>
                 <button type="submit" style="padding: 10px 20px; background: #0056b3; color: white; border: none; font-weight: bold; cursor: pointer;">Generate View</button>
             </form>
         </body>
