@@ -18,6 +18,22 @@ def process_article(slug, is_download=False):
 
     soup = BeautifulSoup(response.text, 'html.parser')
 
+    # Get proper page title if available for templates
+    title_tag = soup.find('title')
+    page_name = title_tag.text if title_tag else slug.replace('_', ' ')
+    
+    # 0. Adjust Title tag to prepend "SpokenView:"
+    if title_tag:
+        title_tag.string = f"SpokenView: {page_name}"
+    else:
+        head = soup.find('head')
+        if not head:
+            head = soup.new_tag('head')
+            soup.insert(0, head)
+        title_tag = soup.new_tag('title')
+        title_tag.string = f"SpokenView: {page_name}"
+        head.append(title_tag)
+
     # 1. Strip structural clutter, sidebars, navigation, and IPA pronunciations
     classes_to_remove = [
         'IPA', 'noprint', 'reference', 'reflist', 'refbegin', 'infobox',
@@ -37,42 +53,71 @@ def process_article(slug, is_download=False):
         if el:
             el.decompose()
 
-    # 2. Table Heuristic: Remove complex tables (>= 5 rows), keep simple lists
+    # 2. Strip unwanted sections (See also, Notes, References, External links)
+    sections_to_remove = ['see also', 'notes', 'references', 'external links']
+    for heading in soup.find_all(['h2', 'h3', 'h4']):
+        heading_text = heading.get_text().strip().lower()
+        if heading_text in sections_to_remove:
+            # The Wikipedia Parsoid API wraps semantic chunks inside <section> tags
+            parent_section = heading.find_parent('section')
+            if parent_section:
+                parent_section.decompose()
+            else:
+                # Fallback: remove heading and everything until the next heading
+                curr = heading.find_next_sibling()
+                heading.decompose()
+                while curr and curr.name not in ['h1', 'h2', 'h3', 'h4']:
+                    next_el = curr.find_next_sibling()
+                    curr.decompose()
+                    curr = next_el
+
+    # 3. Table Heuristic: Remove complex tables (>= 5 rows), keep simple lists
     for table in soup.find_all('table'):
         rows = table.find_all('tr')
         if len(rows) >= 5:
             table.decompose()
 
-    # 3. Strip specific identifier links (ISBN, PMID, etc.) 
+    # 4. Strip specific identifier links (ISBN, PMID, etc.) 
     for a in soup.find_all('a', href=True):
         if '(identifier)' in a['href'] or 'Special:BookSources' in a['href']:
             a.decompose()
 
-    # 4. Absolutize URLs for offline viewing and live-served images
+    # 5. Absolutize URLs for offline viewing and live-served images
     for tag in soup.find_all(['a', 'img', 'link']):
         if tag.name == 'a' and tag.has_attr('href'):
             tag['href'] = urljoin(WIKI_ROOT_URL, tag['href'])
         elif tag.name == 'img' and tag.has_attr('src'):
             tag['src'] = urljoin(WIKI_ROOT_URL, tag['src'])
-            # Remove srcset so offline HTML relies exclusively on the absolute src
             if tag.has_attr('srcset'):
                 del tag['srcset']
         elif tag.name == 'link' and tag.has_attr('href'):
             tag['href'] = urljoin(WIKI_ROOT_URL, tag['href'])
 
-    # 5. Make Captions Prominent for TTS / Human Readers
+    # 6. Make Captions Prominent for TTS / Human Readers
     for figure in soup.find_all('figure'):
         figcaption = figure.find('figcaption')
         if figcaption:
-            # High-contrast visual cue for readers
             figcaption['style'] = "display: block; background-color: #f9f9f9; padding: 12px; border-left: 5px solid #0056b3; font-weight: bold; margin-top: 15px; font-size: 1.1em;"
-            
             prefix = soup.new_tag('span')
             prefix.string = "CAPTION: "
             prefix['style'] = "color: #0056b3; text-transform: uppercase; margin-right: 8px;"
             figcaption.insert(0, prefix)
 
-    # 6. Inject base typography 
+    body = soup.find('body') or soup
+
+    # 7. Inject Spoken Wikipedia preamble
+    preamble = soup.new_tag('p')
+    preamble['style'] = "font-style: italic; font-weight: bold; font-size: 1.2em; background: #e0f2fe; padding: 15px; border-radius: 5px; margin-bottom: 25px;"
+    preamble.string = f"This is the Spoken Wikipedia article on {page_name} read aloud by Wikipedia user __________"
+    body.insert(0, preamble)
+
+    # 8. Inject Spoken Wikipedia outro
+    outro = soup.new_tag('p')
+    outro['style'] = "font-style: italic; font-size: 1.1em; background: #e0f2fe; padding: 15px; border-radius: 5px; margin-top: 40px;"
+    outro.string = "This recording and the underlying text are available under the Creative Commons Attribution Share Alike 4.0 license. Additional terms may apply."
+    body.append(outro)
+
+    # 9. Inject base typography 
     head = soup.find('head')
     if not head:
         head = soup.new_tag('head')
@@ -86,7 +131,7 @@ def process_article(slug, is_download=False):
     """
     head.append(style)
 
-    # 7. Inject floating save button (only for the live web view)
+    # 10. Inject floating save button (only for live view)
     if not is_download:
         ui_html = f"""
         <div id="spoken-view-ui" style="position: fixed; bottom: 20px; right: 20px; background: #fff; padding: 15px; border: 1px solid #ccc; box-shadow: 0 4px 6px rgba(0,0,0,0.1); z-index: 9999;">
@@ -94,10 +139,7 @@ def process_article(slug, is_download=False):
         </div>
         """
         ui_soup = BeautifulSoup(ui_html, 'html.parser')
-        if soup.body:
-            soup.body.append(ui_soup)
-        else:
-            soup.append(ui_soup)
+        body.append(ui_soup)
 
     return str(soup), 200
 
@@ -105,7 +147,6 @@ def process_article(slug, is_download=False):
 def index():
     if request.method == 'POST':
         user_input = request.form.get('wiki_input', '').strip()
-        # Parse slug from full URL or use direct string
         if 'wikipedia.org/wiki/' in user_input:
             slug = user_input.split('/wiki/')[-1]
         else:
@@ -114,6 +155,7 @@ def index():
 
     return """
     <html>
+        <head><title>Spoken View</title></head>
         <body style="font-family: sans-serif; max-width: 600px; margin: 40px auto; line-height: 1.6;">
             <h1>Spoken View</h1>
             <p>Enter an English Wikipedia article URL or exact name to generate a clutter-free, read-aloud version.</p>
