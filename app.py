@@ -1,4 +1,5 @@
 import re
+import difflib
 from urllib.parse import urljoin
 from datetime import datetime
 from flask import Flask, request, Response, redirect
@@ -7,23 +8,19 @@ from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 
-# Core endpoints
 WIKI_API_URL = "https://en.wikipedia.org/api/rest_v1/page/html/"
 WIKI_ROOT_URL = "https://en.wikipedia.org/"
 
 def process_article(slug, is_download=False, image_level='section_top', show_alt=True):
-    """Fetches Parsoid HTML, cleans the DOM, and injects reading styles."""
     response = requests.get(f"{WIKI_API_URL}{slug}")
     if response.status_code != 200:
         return f"Error fetching article: {response.status_code}", response.status_code
 
     soup = BeautifulSoup(response.text, 'html.parser')
 
-    # Get proper page title if available for templates
     title_tag = soup.find('title')
     page_name = title_tag.text if title_tag else slug.replace('_', ' ')
     
-    # Extract modification timestamp for the footer
     meta_time = soup.find('meta', property='dc:modified')
     if meta_time and meta_time.get('content'):
         try:
@@ -37,7 +34,6 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         date_str = "[Date]"
         time_str = "[Time]"
 
-    # 0. Adjust Title tag to prepend "SpokenView:" and remove <base> tag
     base_tag = soup.find('base')
     if base_tag:
         base_tag.decompose()
@@ -53,7 +49,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         title_tag.string = f"SpokenView: {page_name}"
         head.append(title_tag)
 
-    # 1. Strip structural clutter, sidebars, navigation, and IPA pronunciations
+    # 1. Strip structural clutter but rescue <figure> tags first
     classes_to_remove = [
         'IPA', 'noprint', 'reference', 'reflist', 'refbegin', 'infobox',
         'hatnote', 'gallery', 'sidebar', 'tsingle', 'trow', 'timeline-wrapper',
@@ -64,15 +60,20 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
     ]
     for cls in classes_to_remove:
         for el in soup.find_all(class_=cls):
-            el.decompose()
+            if el.parent is not None:
+                for fig in el.find_all('figure'):
+                    el.insert_before(fig)
+                el.decompose()
 
     ids_to_remove = ['catlinks', 'footer', 'siteSub', 'header']
     for element_id in ids_to_remove:
         el = soup.find(id=element_id)
-        if el:
+        if el and el.parent is not None:
+            for fig in el.find_all('figure'):
+                el.insert_before(fig)
             el.decompose()
 
-    # 2. Number headings sequentially to match Wikipedia's native structure
+    # 2. Number headings sequentially
     h2_data = []
     h2_tags = soup.find_all('h2')
     for idx, heading in enumerate(h2_tags, start=1):
@@ -87,7 +88,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         })
         heading.string = f"Section {idx}: {original_text}"
 
-    # 3. Strip unwanted sections (See also, Notes, References, External links, Further reading)
+    # 3. Strip unwanted sections
     sections_to_remove = ['see also', 'notes', 'references', 'external links', 'further reading']
     for data in h2_data:
         heading = data['tag']
@@ -95,22 +96,29 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         if heading_lower in sections_to_remove:
             parent_section = heading.find_parent('section')
             if parent_section:
+                for fig in parent_section.find_all('figure'):
+                    parent_section.insert_before(fig)
                 parent_section.decompose()
             else:
                 curr = heading.find_next_sibling()
                 heading.decompose()
                 while curr and curr.name not in ['h1', 'h2', 'h3', 'h4']:
                     next_el = curr.find_next_sibling()
+                    for fig in curr.find_all('figure'):
+                        curr.insert_before(fig)
                     curr.decompose()
                     curr = next_el
 
-    # 4. Table Heuristic: Remove complex tables (>= 5 rows), keep simple lists
+    # 4. Table Heuristic (rescue figures first)
     for table in soup.find_all('table'):
-        rows = table.find_all('tr')
-        if len(rows) >= 5:
-            table.decompose()
+        if table.parent is not None:
+            rows = table.find_all('tr')
+            if len(rows) >= 5:
+                for fig in table.find_all('figure'):
+                    table.insert_before(fig)
+                table.decompose()
 
-    # 5. Filter Images based on User Parameter (main, section_top, all)
+    # 5. Filter Images based on User Parameter
     if image_level == 'main':
         for idx, fig in enumerate(soup.find_all('figure')):
             if idx > 0:
@@ -127,12 +135,12 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
                 if idx > 0:
                     fig.decompose()
 
-    # 6. Strip specific identifier links (ISBN, PMID, etc.) 
+    # 6. Strip specific identifier links
     for a in soup.find_all('a', href=True):
         if '(identifier)' in a['href'] or 'Special:BookSources' in a['href']:
             a.decompose()
 
-    # 7. Absolutize URLs for offline viewing and live-served images
+    # 7. Absolutize URLs
     for tag in soup.find_all(['a', 'img', 'link']):
         if tag.name == 'a' and tag.has_attr('href'):
             tag['href'] = urljoin(WIKI_ROOT_URL, tag['href'])
@@ -143,37 +151,43 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         elif tag.name == 'link' and tag.has_attr('href'):
             tag['href'] = urljoin(WIKI_ROOT_URL, tag['href'])
 
-    # 8. Format Alt Text and Captions for Prominence
+    # 8. Format Alt Text and Captions
     for figure in soup.find_all('figure'):
         figcaption = figure.find('figcaption')
         img = figure.find('img')
         alt_text = img.get('alt', '').strip() if img else ""
+        caption_text = figcaption.get_text(separator=" ", strip=True) if figcaption else ""
+
+        show_this_alt = False
+        if show_alt and alt_text:
+            similarity = difflib.SequenceMatcher(None, alt_text.lower(), caption_text.lower()).ratio()
+            if similarity < 0.95:
+                show_this_alt = True
 
         if not figcaption:
-            if show_alt and alt_text:
+            if show_this_alt:
                 figcaption = soup.new_tag('figcaption')
+                figcaption['style'] = "display: block; background-color: #f9f9f9; padding: 12px; border-left: 5px solid #0056b3; margin-top: 15px; font-size: 1.1em;"
                 figure.append(figcaption)
-            else:
-                continue
+                
+                alt_block = soup.new_tag('div')
+                alt_prefix = soup.new_tag('span')
+                alt_prefix.string = "ALT TEXT: "
+                alt_prefix['style'] = "color: #0056b3; font-weight: bold; text-transform: uppercase; margin-right: 8px;"
+                alt_block.append(alt_prefix)
+                alt_block.append(alt_text)
+                figcaption.append(alt_block)
+            continue
 
         figcaption['style'] = "display: block; background-color: #f9f9f9; padding: 12px; border-left: 5px solid #0056b3; margin-top: 15px; font-size: 1.1em;"
-        
         original_contents = list(figcaption.contents)
         figcaption.clear()
 
-        if show_alt and alt_text:
-            alt_block = soup.new_tag('div')
-            alt_block['style'] = "margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid #ddd;"
-            
-            alt_prefix = soup.new_tag('span')
-            alt_prefix.string = "ALT TEXT: "
-            alt_prefix['style'] = "color: #0056b3; font-weight: bold; text-transform: uppercase; margin-right: 8px;"
-            
-            alt_block.append(alt_prefix)
-            alt_block.append(alt_text)
-            figcaption.append(alt_block)
-
+        # Build Caption Block
         cap_block = soup.new_tag('div')
+        if show_this_alt:
+            cap_block['style'] = "margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid #ddd;"
+            
         cap_prefix = soup.new_tag('span')
         cap_prefix.string = "CAPTION: "
         cap_prefix['style'] = "color: #0056b3; font-weight: bold; text-transform: uppercase; margin-right: 8px;"
@@ -184,6 +198,16 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
             
         figcaption.append(cap_block)
 
+        # Build Alt Block directly below the caption
+        if show_this_alt:
+            alt_block = soup.new_tag('div')
+            alt_prefix = soup.new_tag('span')
+            alt_prefix.string = "ALT TEXT: "
+            alt_prefix['style'] = "color: #0056b3; font-weight: bold; text-transform: uppercase; margin-right: 8px;"
+            alt_block.append(alt_prefix)
+            alt_block.append(alt_text)
+            figcaption.append(alt_block)
+
     body = soup.find('body') or soup
 
     # 9. Inject Spoken Wikipedia preamble
@@ -192,7 +216,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
     preamble.string = f"This is the Spoken Wikipedia article on {page_name} read aloud by Wikipedia user __________"
     body.insert(0, preamble)
 
-    # 10. Generate Top-Level Table of Contents (H2 only)
+    # 10. Generate Top-Level Table of Contents
     surviving_h2s = soup.find_all('h2')
     if surviving_h2s:
         toc_container = soup.new_tag('div')
@@ -252,7 +276,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
     """
     head.append(style)
 
-    # 13. Inject floating save button (only for live view)
+    # 13. Inject floating save button
     if not is_download:
         show_alt_str = 'true' if show_alt else 'false'
         ui_html = f"""
@@ -295,7 +319,7 @@ def index():
                 </div>
                 
                 <div style="margin-bottom: 20px;">
-                    <label style="font-weight: bold;"><input type="checkbox" name="show_alt" value="true" checked> Show alt text</label>
+                    <label style="font-weight: bold;"><input type="checkbox" name="show_alt" value="true" checked> Show alt text (when distinct from caption)</label>
                 </div>
 
                 <button type="submit" style="padding: 10px 20px; background: #0056b3; color: white; border: none; font-weight: bold; cursor: pointer;">Generate View</button>
