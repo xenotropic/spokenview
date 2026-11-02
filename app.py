@@ -65,27 +65,43 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
 
     # 1. Find the main image unconditionally BEFORE structural cleanup
     main_image_node = None
-    for file_node in soup.find_all(attrs={'typeof': re.compile(r'mw:File')}):
-        img = file_node.find('img')
-        if img:
-            # Skip tiny decorative icons
-            w = img.get('width') or img.get('data-file-width')
-            if w and str(w).isdigit() and int(w) < 100:
-                continue
-            main_image_node = file_node.extract()
-            main_image_node.name = 'figure'
-            break
+    
+    # Prioritize the infobox for the main image
+    infobox = soup.find('table', class_=re.compile(r'\binfobox\b'))
+    if infobox:
+        for file_node in infobox.find_all(attrs={'typeof': re.compile(r'mw:File')}):
+            img = file_node.find('img')
+            if img:
+                w = img.get('width') or img.get('data-file-width')
+                # Require at least 150px to filter out tiny icons like the Earth symbol
+                if w and str(w).isdigit() and int(w) >= 150:
+                    main_image_node = file_node.extract()
+                    main_image_node.name = 'figure'
+                    break
+
+    # Fallback to the first large image in the document if no infobox is found
+    if not main_image_node:
+        for file_node in soup.find_all(attrs={'typeof': re.compile(r'mw:File')}):
+            img = file_node.find('img')
+            if img:
+                w = img.get('width') or img.get('data-file-width')
+                if w and str(w).isdigit() and int(w) >= 150:
+                    main_image_node = file_node.extract()
+                    main_image_node.name = 'figure'
+                    break
 
     # 2. Convert all remaining mw:File nodes to standard <figure> tags
     for file_node in soup.find_all(attrs={'typeof': re.compile(r'mw:File')}):
         file_node.name = 'figure'
 
-    # 3. Strip purely decorative or unwanted structural clutter
+    # 3. Strip purely decorative or unwanted structural clutter completely (DO NOT rescue figures)
     destroy_entirely = [
         'IPA', 'noprint', 'reference', 'reflist', 'refbegin', 
         'hatnote', 'metadata', 'ambox', 'mbox', 'ombox', 'dmbox', 'fmbox', 
         'mwe-math-element', 'mw-highlight', 'toc', 'rellink', 'excerpt-hat', 
-        'navbox', 'navbar', 'wgCoordinates', 'mw-jump-link'
+        'navbox', 'navbar', 'wgCoordinates', 'mw-jump-link',
+        'infobox', 'gallery', 'sidebar', 'tsingle', 'trow', 'timeline-wrapper',
+        'side-box-flex', 'box-Expand_section', 'geobox', 'mod-gallery'
     ]
     for cls in destroy_entirely:
         for el in soup.find_all(class_=cls):
@@ -97,20 +113,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         if el:
             el.decompose()
 
-    # 4. Strip large structural containers but RESCUE their figures (e.g., infoboxes)
-    rescue_figures_from = [
-        'infobox', 'gallery', 'sidebar', 'tsingle', 'trow', 'timeline-wrapper',
-        'side-box-flex', 'box-Expand_section', 'geobox', 'mod-gallery'
-    ]
-    for cls in rescue_figures_from:
-        for el in soup.find_all(class_=cls):
-            if el.parent is not None:
-                figures = el.find_all('figure')
-                for fig in figures:
-                    el.insert_before(fig.extract())
-                el.decompose()
-
-    # 5. Number headings sequentially
+    # 4. Number headings sequentially
     h2_data = []
     h2_tags = soup.find_all('h2')
     for idx, heading in enumerate(h2_tags, start=1):
@@ -125,7 +128,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         })
         heading.string = f"Section {idx}: {original_text}"
 
-    # 6. Strip unwanted sections
+    # 5. Strip unwanted sections
     sections_to_remove = ['see also', 'notes', 'references', 'external links', 'further reading']
     for data in h2_data:
         heading = data['tag']
@@ -133,29 +136,22 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         if heading_lower in sections_to_remove:
             parent_section = heading.find_parent('section')
             if parent_section:
-                for fig in parent_section.find_all('figure'):
-                    parent_section.insert_before(fig.extract())
                 parent_section.decompose()
             else:
                 curr = heading.find_next_sibling()
                 heading.decompose()
                 while curr and curr.name not in ['h1', 'h2', 'h3', 'h4']:
                     next_el = curr.find_next_sibling()
-                    for fig in curr.find_all('figure'):
-                        curr.insert_before(fig.extract())
                     curr.decompose()
                     curr = next_el
 
-    # 7. Table Heuristic (rescue figures first)
+    # 6. Table Heuristic (Delete large tables entirely)
     for table in soup.find_all('table'):
-        if table.parent is not None:
-            rows = table.find_all('tr')
-            if len(rows) >= 5:
-                for fig in table.find_all('figure'):
-                    table.insert_before(fig.extract())
-                table.decompose()
+        rows = table.find_all('tr')
+        if len(rows) >= 5:
+            table.decompose()
 
-    # 8. Filter Images based on User Parameter
+    # 7. Filter Images based on User Parameter (main_image_node is immune because it was extracted)
     if image_level == 'main':
         for fig in soup.find_all('figure'):
             fig.decompose()
@@ -171,18 +167,12 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
                 if idx > 0:
                     fig.decompose()
 
-    body = soup.find('body') or soup
-
-    # 9. Re-inject the Main Image unconditionally so it gets formatted by URL & Caption logic
-    if main_image_node:
-        body.insert(0, main_image_node)
-
-    # 10. Strip specific identifier links
+    # 8. Strip specific identifier links
     for a in soup.find_all('a', href=True):
         if '(identifier)' in a['href'] or 'Special:BookSources' in a['href']:
             a.decompose()
 
-    # 11. Absolutize URLs
+    # 9. Absolutize URLs
     for tag in soup.find_all(['a', 'img', 'link']):
         if tag.name == 'a' and tag.has_attr('href'):
             tag['href'] = urljoin(WIKI_ROOT_URL, tag['href'])
@@ -193,8 +183,12 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         elif tag.name == 'link' and tag.has_attr('href'):
             tag['href'] = urljoin(WIKI_ROOT_URL, tag['href'])
 
-    # 12. Format Alt Text and Captions
-    for figure in soup.find_all('figure'):
+    # 10. Format Alt Text and Captions
+    figures_to_format = soup.find_all('figure')
+    if main_image_node:
+        figures_to_format.append(main_image_node)
+
+    for figure in figures_to_format:
         figcaption = figure.find('figcaption')
         img = figure.find('img')
         alt_text = img.get('alt', '').strip() if img else ""
@@ -207,7 +201,6 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
             if similarity < 0.95:
                 show_this_alt = True
 
-        # Handle images lacking an original caption
         if not figcaption:
             if show_this_alt:
                 figcaption = soup.new_tag('figcaption')
@@ -252,14 +245,17 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
             alt_block.append(alt_text)
             figcaption.append(alt_block)
 
-    # 13. Inject Spoken Wikipedia preamble (pushes the main image down, making Preamble first)
+    body = soup.find('body') or soup
+
+    # 11. Inject Spoken Wikipedia preamble
     preamble = soup.new_tag('p')
     preamble['style'] = "font-style: italic; font-weight: bold; font-size: 1.2em; background: #e0f2fe; padding: 15px; border-radius: 5px; margin-bottom: 25px;"
     preamble.string = f"This is the Spoken Wikipedia article on {page_name} read aloud by Wikipedia user __________"
     body.insert(0, preamble)
 
-    # 14. Generate Top-Level Table of Contents
+    # 12. Generate Top-Level Table of Contents
     surviving_h2s = soup.find_all('h2')
+    toc_container = None
     if surviving_h2s:
         toc_container = soup.new_tag('div')
         toc_container['style'] = "background: #f8f9fa; padding: 15px; margin: 20px 0; border: 1px solid #a2a9b1; border-radius: 2px;"
@@ -291,15 +287,19 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
             toc_list.append(li)
             
         toc_container.append(toc_list)
-        
-        if main_image_node:
-            main_image_node.insert_after(toc_container)
-        else:
-            preamble.insert_after(toc_container)
+        preamble.insert_after(toc_container)
 
-    # 15. Inject Spoken Wikipedia outro and timestamp
+    # 13. Inject the Main Image (Floated right, below TOC)
+    if main_image_node:
+        main_image_node['style'] = "float: right; clear: right; margin: 0 0 15px 20px; max-width: 45%;"
+        if toc_container:
+            toc_container.insert_after(main_image_node)
+        else:
+            preamble.insert_after(main_image_node)
+
+    # 14. Inject Spoken Wikipedia outro and timestamp
     outro = soup.new_tag('p')
-    outro['style'] = "font-style: italic; font-size: 1.1em; background: #e0f2fe; padding: 15px; border-radius: 5px; margin-top: 40px;"
+    outro['style'] = "font-style: italic; font-size: 1.1em; background: #e0f2fe; padding: 15px; border-radius: 5px; margin-top: 40px; clear: both;"
     outro.string = "This recording and the underlying text are available under the Creative Commons Attribution Share Alike 4.0 license. Additional terms may apply."
     body.append(outro)
 
@@ -308,7 +308,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
     timestamp_footer.string = f"This page was based upon the version of the Wikipedia article {page_name} as it was on {date_str} at {time_str}."
     body.append(timestamp_footer)
 
-    # 16. Inject base typography 
+    # 15. Inject base typography 
     head = soup.find('head')
     if not head:
         head = soup.new_tag('head')
@@ -322,7 +322,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
     """
     head.append(style)
 
-    # 17. Inject floating save button
+    # 16. Inject floating save button
     if not is_download:
         show_alt_str = 'true' if show_alt else 'false'
         ui_html = f"""
@@ -360,44 +360,4 @@ def index():
                 <p style="margin-bottom: 5px; font-weight: bold;">Please select how many images to display:</p>
                 <div style="margin-bottom: 15px;">
                     <label style="display: block; margin-bottom: 5px;"><input type="radio" name="image_level" value="main"> Main article image only</label>
-                    <label style="display: block; margin-bottom: 5px;"><input type="radio" name="image_level" value="section_top" checked> Top image per section (always includes main image)</label>
-                    <label style="display: block; margin-bottom: 5px;"><input type="radio" name="image_level" value="all"> All images</label>
-                </div>
-                
-                <div style="margin-bottom: 20px;">
-                    <label style="font-weight: bold;"><input type="checkbox" name="show_alt" value="true" checked> Show alt text (when distinct from caption)</label>
-                </div>
-
-                <button type="submit" style="padding: 10px 20px; background: #0056b3; color: white; border: none; font-weight: bold; cursor: pointer;">Generate View</button>
-            </form>
-        </body>
-    </html>
-    """
-
-@app.route('/view/<path:slug>')
-def view_article(slug):
-    image_level = request.args.get('image_level', 'section_top')
-    show_alt = request.args.get('show_alt', 'true') == 'true'
-    
-    html_content, status_code = process_article(slug, is_download=False, image_level=image_level, show_alt=show_alt)
-    if status_code != 200:
-        return html_content, status_code
-    return Response(html_content, mimetype='text/html')
-
-@app.route('/download/<path:slug>')
-def download_article(slug):
-    image_level = request.args.get('image_level', 'section_top')
-    show_alt = request.args.get('show_alt', 'true') == 'true'
-
-    html_content, status_code = process_article(slug, is_download=True, image_level=image_level, show_alt=show_alt)
-    if status_code != 200:
-        return html_content, status_code
-    
-    return Response(
-        html_content,
-        mimetype='text/html',
-        headers={"Content-Disposition": f"attachment; filename={slug}_Spoken_View.html"}
-    )
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+                    <label style="display: block; margin-bottom: 5px;"><input type="radio" name="image_level" value
