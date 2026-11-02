@@ -49,31 +49,53 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         title_tag.string = f"SpokenView: {page_name}"
         head.append(title_tag)
 
-    # 1. Strip structural clutter but rescue <figure> tags first
-    classes_to_remove = [
-        'IPA', 'noprint', 'reference', 'reflist', 'refbegin', 'infobox',
-        'hatnote', 'gallery', 'sidebar', 'tsingle', 'trow', 'timeline-wrapper',
-        'side-box-flex', 'box-Expand_section', 'metadata', 'ambox', 'mbox',
-        'ombox', 'dmbox', 'fmbox', 'geobox', 'mod-gallery', 'mwe-math-element',
-        'mw-highlight', 'toc', 'rellink', 'excerpt-hat', 'navbox', 'navbar',
-        'wgCoordinates', 'mw-jump-link'
+    # 0. Suppress Audio Files (Ogg, MP3, Flac) and Audio Figures
+    for audio_tag in soup.find_all('audio'):
+        audio_tag.decompose()
+        
+    for fig in soup.find_all('figure'):
+        typeof = fig.get('typeof', '')
+        if typeof and 'Audio' in typeof:
+            fig.decompose()
+            continue
+            
+        img = fig.find('img')
+        if img and img.has_attr('src'):
+            src = img['src'].lower()
+            if any(ext in src for ext in ['.ogg', '.oga', '.mp3', '.flac', '.wav']):
+                fig.decompose()
+
+    # 1. Strip purely decorative or unwanted structural clutter (DO NOT rescue figures from these)
+    destroy_entirely = [
+        'IPA', 'noprint', 'reference', 'reflist', 'refbegin', 
+        'hatnote', 'metadata', 'ambox', 'mbox', 'ombox', 'dmbox', 'fmbox', 
+        'mwe-math-element', 'mw-highlight', 'toc', 'rellink', 'excerpt-hat', 
+        'navbox', 'navbar', 'wgCoordinates', 'mw-jump-link'
     ]
-    for cls in classes_to_remove:
+    for cls in destroy_entirely:
         for el in soup.find_all(class_=cls):
-            if el.parent is not None:
-                for fig in el.find_all('figure'):
-                    el.insert_before(fig)
-                el.decompose()
+            el.decompose()
 
     ids_to_remove = ['catlinks', 'footer', 'siteSub', 'header']
     for element_id in ids_to_remove:
         el = soup.find(id=element_id)
-        if el and el.parent is not None:
-            for fig in el.find_all('figure'):
-                el.insert_before(fig)
+        if el:
             el.decompose()
 
-    # 2. Number headings sequentially
+    # 2. Strip large structural containers but RESCUE their figures (e.g., infoboxes)
+    rescue_figures_from = [
+        'infobox', 'gallery', 'sidebar', 'tsingle', 'trow', 'timeline-wrapper',
+        'side-box-flex', 'box-Expand_section', 'geobox', 'mod-gallery'
+    ]
+    for cls in rescue_figures_from:
+        for el in soup.find_all(class_=cls):
+            if el.parent is not None:
+                figures = el.find_all('figure')
+                for fig in figures:
+                    el.insert_before(fig.extract())
+                el.decompose()
+
+    # 3. Number headings sequentially
     h2_data = []
     h2_tags = soup.find_all('h2')
     for idx, heading in enumerate(h2_tags, start=1):
@@ -88,7 +110,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         })
         heading.string = f"Section {idx}: {original_text}"
 
-    # 3. Strip unwanted sections
+    # 4. Strip unwanted sections
     sections_to_remove = ['see also', 'notes', 'references', 'external links', 'further reading']
     for data in h2_data:
         heading = data['tag']
@@ -97,7 +119,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
             parent_section = heading.find_parent('section')
             if parent_section:
                 for fig in parent_section.find_all('figure'):
-                    parent_section.insert_before(fig)
+                    parent_section.insert_before(fig.extract())
                 parent_section.decompose()
             else:
                 curr = heading.find_next_sibling()
@@ -105,20 +127,20 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
                 while curr and curr.name not in ['h1', 'h2', 'h3', 'h4']:
                     next_el = curr.find_next_sibling()
                     for fig in curr.find_all('figure'):
-                        curr.insert_before(fig)
+                        curr.insert_before(fig.extract())
                     curr.decompose()
                     curr = next_el
 
-    # 4. Table Heuristic (rescue figures first)
+    # 5. Table Heuristic (rescue figures first)
     for table in soup.find_all('table'):
         if table.parent is not None:
             rows = table.find_all('tr')
             if len(rows) >= 5:
                 for fig in table.find_all('figure'):
-                    table.insert_before(fig)
+                    table.insert_before(fig.extract())
                 table.decompose()
 
-    # 5. Filter Images based on User Parameter
+    # 6. Filter Images based on User Parameter
     if image_level == 'main':
         for idx, fig in enumerate(soup.find_all('figure')):
             if idx > 0:
@@ -135,12 +157,12 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
                 if idx > 0:
                     fig.decompose()
 
-    # 6. Strip specific identifier links
+    # 7. Strip specific identifier links
     for a in soup.find_all('a', href=True):
         if '(identifier)' in a['href'] or 'Special:BookSources' in a['href']:
             a.decompose()
 
-    # 7. Absolutize URLs
+    # 8. Absolutize URLs
     for tag in soup.find_all(['a', 'img', 'link']):
         if tag.name == 'a' and tag.has_attr('href'):
             tag['href'] = urljoin(WIKI_ROOT_URL, tag['href'])
@@ -151,7 +173,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         elif tag.name == 'link' and tag.has_attr('href'):
             tag['href'] = urljoin(WIKI_ROOT_URL, tag['href'])
 
-    # 8. Format Alt Text and Captions
+    # 9. Format Alt Text and Captions
     for figure in soup.find_all('figure'):
         figcaption = figure.find('figcaption')
         img = figure.find('img')
@@ -210,13 +232,13 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
 
     body = soup.find('body') or soup
 
-    # 9. Inject Spoken Wikipedia preamble
+    # 10. Inject Spoken Wikipedia preamble
     preamble = soup.new_tag('p')
     preamble['style'] = "font-style: italic; font-weight: bold; font-size: 1.2em; background: #e0f2fe; padding: 15px; border-radius: 5px; margin-bottom: 25px;"
     preamble.string = f"This is the Spoken Wikipedia article on {page_name} read aloud by Wikipedia user __________"
     body.insert(0, preamble)
 
-    # 10. Generate Top-Level Table of Contents
+    # 11. Generate Top-Level Table of Contents
     surviving_h2s = soup.find_all('h2')
     if surviving_h2s:
         toc_container = soup.new_tag('div')
@@ -251,7 +273,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         toc_container.append(toc_list)
         preamble.insert_after(toc_container)
 
-    # 11. Inject Spoken Wikipedia outro and timestamp
+    # 12. Inject Spoken Wikipedia outro and timestamp
     outro = soup.new_tag('p')
     outro['style'] = "font-style: italic; font-size: 1.1em; background: #e0f2fe; padding: 15px; border-radius: 5px; margin-top: 40px;"
     outro.string = "This recording and the underlying text are available under the Creative Commons Attribution Share Alike 4.0 license. Additional terms may apply."
@@ -262,7 +284,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
     timestamp_footer.string = f"This page was based upon the version of the Wikipedia article {page_name} as it was on {date_str} at {time_str}."
     body.append(timestamp_footer)
 
-    # 12. Inject base typography 
+    # 13. Inject base typography 
     head = soup.find('head')
     if not head:
         head = soup.new_tag('head')
@@ -276,7 +298,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
     """
     head.append(style)
 
-    # 13. Inject floating save button
+    # 14. Inject floating save button
     if not is_download:
         show_alt_str = 'true' if show_alt else 'false'
         ui_html = f"""
