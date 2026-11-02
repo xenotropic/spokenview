@@ -50,42 +50,57 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         head.append(title_tag)
 
     # 0. Suppress Audio Files and Audio Figures
-    for audio_tag in soup.find_all('audio'):
-        audio_tag.decompose()
-        
+    for media_tag in soup.find_all(['audio', 'video']):
+        parent_container = media_tag.find_parent(attrs={'typeof': re.compile(r'mw:File')})
+        if parent_container:
+            parent_container.decompose()
+        else:
+            media_tag.decompose()
+            
     for file_node in soup.find_all(attrs={'typeof': re.compile(r'mw:File')}):
-        if 'Audio' in file_node.get('typeof', ''):
+        typeof = file_node.get('typeof', '')
+        if 'Audio' in typeof or 'Video' in typeof:
             file_node.decompose()
             continue
+            
+        media_link = file_node.find('a', href=re.compile(r'\.(ogg|oga|mp3|flac|wav|webm|mp4)($|\?)', re.I))
+        if media_link:
+            file_node.decompose()
+            continue
+            
         img = file_node.find('img')
         if img and img.has_attr('src'):
             src = img['src'].lower()
-            if any(ext in src for ext in ['.ogg', '.oga', '.mp3', '.flac', '.wav']):
+            if any(ext in src for ext in ['.ogg', '.oga', '.mp3', '.flac', '.wav', '.webm', '.mp4']):
                 file_node.decompose()
 
-    # 1. Find the main image unconditionally BEFORE structural cleanup
+    # 1. Find the main image and rescue its caption BEFORE structural cleanup
     main_image_node = None
-    
-    infobox = soup.find('table', class_=re.compile(r'\binfobox\b'))
-    if infobox:
-        for file_node in infobox.find_all(attrs={'typeof': re.compile(r'mw:File')}):
-            img = file_node.find('img')
-            if img:
-                w = img.get('width') or img.get('data-file-width')
-                if w and str(w).isdigit() and int(w) >= 150:
-                    main_image_node = file_node.extract()
-                    main_image_node.name = 'figure'
-                    break
-
-    if not main_image_node:
-        for file_node in soup.find_all(attrs={'typeof': re.compile(r'mw:File')}):
-            img = file_node.find('img')
-            if img:
-                w = img.get('width') or img.get('data-file-width')
-                if w and str(w).isdigit() and int(w) >= 150:
-                    main_image_node = file_node.extract()
-                    main_image_node.name = 'figure'
-                    break
+    for file_node in soup.find_all(attrs={'typeof': re.compile(r'mw:File')}):
+        img = file_node.find('img')
+        if img:
+            w = img.get('width') or img.get('data-file-width')
+            if w and str(w).isdigit() and int(w) >= 150:
+                caption_text = None
+                if not file_node.find('figcaption'):
+                    parent_td = file_node.find_parent(['td', 'th'])
+                    if parent_td:
+                        parent_tr = parent_td.find_parent('tr')
+                        if parent_tr:
+                            next_tr = parent_tr.find_next_sibling('tr')
+                            if next_tr and not next_tr.find('img'):
+                                caption_text = next_tr.get_text(strip=True)
+                
+                main_image_node = file_node.extract()
+                main_image_node.name = 'figure'
+                main_image_node['id'] = 'main-image'
+                
+                if caption_text and not main_image_node.find('figcaption'):
+                    new_caption = soup.new_tag('figcaption')
+                    new_caption.string = caption_text
+                    main_image_node.append(new_caption)
+                    
+                break
 
     # 2. Convert all remaining mw:File nodes to standard <figure> tags
     for file_node in soup.find_all(attrs={'typeof': re.compile(r'mw:File')}):
@@ -148,20 +163,21 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         if len(rows) >= 5:
             table.decompose()
 
-    # 7. Filter Images based on User Parameter (main_image_node is immune)
+    # 7. Filter Images based on User Parameter
     if image_level == 'main':
         for fig in soup.find_all('figure'):
-            fig.decompose()
+            if fig != main_image_node:
+                fig.decompose()
     elif image_level == 'section_top':
         sections = soup.find_all('section')
         if sections:
             for sec in sections:
                 for idx, fig in enumerate(sec.find_all('figure')):
-                    if idx > 0:
+                    if idx > 0 and fig != main_image_node:
                         fig.decompose()
         else:
             for idx, fig in enumerate(soup.find_all('figure')):
-                if idx > 0:
+                if idx > 0 and fig != main_image_node:
                     fig.decompose()
 
     # 8. Strip specific identifier links
@@ -180,25 +196,24 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         elif tag.name == 'link' and tag.has_attr('href'):
             tag['href'] = urljoin(WIKI_ROOT_URL, tag['href'])
 
-    # 10. Format Alt Text, Captions, and Clearfix
+    # 10. Format Alt Text and Captions
     figures_to_format = soup.find_all('figure')
-    if main_image_node:
+    if main_image_node and main_image_node not in figures_to_format:
         figures_to_format.append(main_image_node)
 
     for figure in figures_to_format:
         figcaption = figure.find('figcaption')
         img = figure.find('img')
         alt_text = img.get('alt', '').strip() if img else ""
-        caption_text = figcaption.get_text(separator=" ", strip=True) if figcaption else ""
-
-        # Logic: If no caption exists but alt text exists, promote alt text to caption
+        
+        # Promote alt text to caption if no caption exists
         if not figcaption and alt_text:
             figcaption = soup.new_tag('figcaption')
             figcaption.string = alt_text
             figure.append(figcaption)
-            caption_text = alt_text
-            # Clear alt text so it doesn't get rendered twice
             alt_text = ""
+
+        caption_text = figcaption.get_text(separator=" ", strip=True) if figcaption else ""
 
         show_this_alt = False
         if show_alt and alt_text and figcaption:
@@ -233,12 +248,6 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
                 alt_block.append(alt_prefix)
                 alt_block.append(alt_text)
                 figcaption.append(alt_block)
-                
-        # Inject clearfix to prevent orphaned text wrapping
-        if figure.parent:
-            clearfix = soup.new_tag('div')
-            clearfix['style'] = "clear: both;"
-            figure.insert_after(clearfix)
 
     body = soup.find('body') or soup
 
@@ -314,6 +323,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         body { font-family: sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; color: #111; } 
         img { max-width: 100%; height: auto; }
         figure { margin-left: 0; margin-right: 0; }
+        figure:not(#main-image) { display: block !important; float: none !important; clear: both !important; margin: 25px 0 !important; width: 100% !important; }
     """
     head.append(style)
 
