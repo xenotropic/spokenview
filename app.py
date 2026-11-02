@@ -76,31 +76,57 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
 
     # 1. Find the main image and rescue its caption BEFORE structural cleanup
     main_image_node = None
-    for file_node in soup.find_all(attrs={'typeof': re.compile(r'mw:File')}):
-        img = file_node.find('img')
-        if img:
-            w = img.get('width') or img.get('data-file-width')
-            if w and str(w).isdigit() and int(w) >= 150:
-                caption_text = None
-                if not file_node.find('figcaption'):
-                    parent_td = file_node.find_parent(['td', 'th'])
-                    if parent_td:
-                        parent_tr = parent_td.find_parent('tr')
-                        if parent_tr:
-                            next_tr = parent_tr.find_next_sibling('tr')
-                            if next_tr and not next_tr.find('img'):
-                                caption_text = next_tr.get_text(strip=True)
-                
-                main_image_node = file_node.extract()
-                main_image_node.name = 'figure'
-                main_image_node['id'] = 'main-image'
-                
-                if caption_text and not main_image_node.find('figcaption'):
-                    new_caption = soup.new_tag('figcaption')
-                    new_caption.string = caption_text
-                    main_image_node.append(new_caption)
+    
+    infobox = soup.find('table', class_=re.compile(r'\binfobox\b'))
+    if infobox:
+        for file_node in infobox.find_all(attrs={'typeof': re.compile(r'mw:File')}):
+            img = file_node.find('img')
+            if img:
+                w = img.get('width') or img.get('data-file-width')
+                if w and str(w).isdigit() and int(w) >= 150:
+                    caption_text = None
                     
-                break
+                    figcaption = file_node.find('figcaption')
+                    if figcaption:
+                        caption_text = figcaption.get_text(separator=" ", strip=True)
+                    else:
+                        parent_td = file_node.find_parent(['td', 'th'])
+                        if parent_td:
+                            caption_div = parent_td.find('div', class_=re.compile(r'infobox-caption|caption'))
+                            if caption_div:
+                                caption_text = caption_div.get_text(separator=" ", strip=True)
+                            else:
+                                parent_tr = parent_td.find_parent('tr')
+                                if parent_tr:
+                                    next_tr = parent_tr.find_next_sibling('tr')
+                                    # Ensure fallback row is not a data row (no <th>)
+                                    if next_tr and not next_tr.find('img') and not next_tr.find('th'):
+                                        caption_text = next_tr.get_text(separator=" ", strip=True)
+                    
+                    main_image_node = file_node.extract()
+                    main_image_node.name = 'figure'
+                    main_image_node['id'] = 'main-image'
+                    
+                    for fc in main_image_node.find_all('figcaption'):
+                        fc.decompose()
+                        
+                    if caption_text:
+                        new_caption = soup.new_tag('figcaption')
+                        new_caption.string = caption_text
+                        main_image_node.append(new_caption)
+                        
+                    break
+
+    if not main_image_node:
+        for file_node in soup.find_all(attrs={'typeof': re.compile(r'mw:File')}):
+            img = file_node.find('img')
+            if img:
+                w = img.get('width') or img.get('data-file-width')
+                if w and str(w).isdigit() and int(w) >= 150:
+                    main_image_node = file_node.extract()
+                    main_image_node.name = 'figure'
+                    main_image_node['id'] = 'main-image'
+                    break
 
     # 2. Convert all remaining mw:File nodes to standard <figure> tags
     for file_node in soup.find_all(attrs={'typeof': re.compile(r'mw:File')}):
@@ -163,7 +189,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         if len(rows) >= 5:
             table.decompose()
 
-    # 7. Filter Images based on User Parameter
+    # 7. Filter Images based on User Parameter (main_image_node is immune)
     if image_level == 'main':
         for fig in soup.find_all('figure'):
             if fig != main_image_node:
@@ -196,7 +222,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         elif tag.name == 'link' and tag.has_attr('href'):
             tag['href'] = urljoin(WIKI_ROOT_URL, tag['href'])
 
-    # 10. Format Alt Text and Captions
+    # 10. Format Alt Text, Captions, and Clearfix
     figures_to_format = soup.find_all('figure')
     if main_image_node and main_image_node not in figures_to_format:
         figures_to_format.append(main_image_node)
@@ -206,7 +232,6 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         img = figure.find('img')
         alt_text = img.get('alt', '').strip() if img else ""
         
-        # Promote alt text to caption if no caption exists
         if not figcaption and alt_text:
             figcaption = soup.new_tag('figcaption')
             figcaption.string = alt_text
@@ -248,6 +273,12 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
                 alt_block.append(alt_prefix)
                 alt_block.append(alt_text)
                 figcaption.append(alt_block)
+                
+        # Inject clearfix to prevent orphaned text wrapping, explicitly skipping the floated main image
+        if figure.get('id') != 'main-image' and figure.parent:
+            clearfix = soup.new_tag('div')
+            clearfix['style'] = "clear: both;"
+            figure.insert_after(clearfix)
 
     body = soup.find('body') or soup
 
@@ -323,7 +354,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         body { font-family: sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; color: #111; } 
         img { max-width: 100%; height: auto; }
         figure { margin-left: 0; margin-right: 0; }
-        figure:not(#main-image) { display: block !important; float: none !important; clear: both !important; margin: 25px 0 !important; width: 100% !important; }
+        figure:not(#main-image) { display: block !important; float: none !important; clear: both !important; margin: 25px 0 !important; }
     """
     head.append(style)
 
