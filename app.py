@@ -260,4 +260,144 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
 
     # 14. Generate Top-Level Table of Contents
     surviving_h2s = soup.find_all('h2')
-    if surviving_h2s
+    if surviving_h2s:
+        toc_container = soup.new_tag('div')
+        toc_container['style'] = "background: #f8f9fa; padding: 15px; margin: 20px 0; border: 1px solid #a2a9b1; border-radius: 2px;"
+        
+        toc_title = soup.new_tag('h2')
+        toc_title.string = "Contents"
+        toc_title['style'] = "margin-top: 0; font-size: 1.2em; border-bottom: none;"
+        toc_container.append(toc_title)
+        
+        toc_list = soup.new_tag('ul')
+        toc_list['style'] = "list-style-type: none; padding-left: 0; margin-bottom: 0;"
+        
+        for h2 in surviving_h2s:
+            li = soup.new_tag('li')
+            li['style'] = "margin-bottom: 6px;"
+            
+            a_tag = soup.new_tag('a')
+            a_tag['href'] = f"#{h2.get('id')}"
+            a_tag['style'] = "text-decoration: none; color: #0645ad; font-weight: bold;"
+            
+            text = h2.get_text()
+            if text.startswith("Section "):
+                toc_text = text.replace("Section ", "", 1).replace(":", ".", 1)
+            else:
+                toc_text = text
+            a_tag.string = toc_text
+            
+            li.append(a_tag)
+            toc_list.append(li)
+            
+        toc_container.append(toc_list)
+        
+        if main_image_node:
+            main_image_node.insert_after(toc_container)
+        else:
+            preamble.insert_after(toc_container)
+
+    # 15. Inject Spoken Wikipedia outro and timestamp
+    outro = soup.new_tag('p')
+    outro['style'] = "font-style: italic; font-size: 1.1em; background: #e0f2fe; padding: 15px; border-radius: 5px; margin-top: 40px;"
+    outro.string = "This recording and the underlying text are available under the Creative Commons Attribution Share Alike 4.0 license. Additional terms may apply."
+    body.append(outro)
+
+    timestamp_footer = soup.new_tag('p')
+    timestamp_footer['style'] = "font-style: italic; font-size: 0.9em; color: #555; margin-top: 15px; border-top: 1px solid #ccc; padding-top: 10px;"
+    timestamp_footer.string = f"This page was based upon the version of the Wikipedia article {page_name} as it was on {date_str} at {time_str}."
+    body.append(timestamp_footer)
+
+    # 16. Inject base typography 
+    head = soup.find('head')
+    if not head:
+        head = soup.new_tag('head')
+        soup.insert(0, head)
+    
+    style = soup.new_tag('style')
+    style.string = """
+        body { font-family: sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; color: #111; } 
+        img { max-width: 100%; height: auto; }
+        figure { margin-left: 0; margin-right: 0; }
+    """
+    head.append(style)
+
+    # 17. Inject floating save button
+    if not is_download:
+        show_alt_str = 'true' if show_alt else 'false'
+        ui_html = f"""
+        <div id="spoken-view-ui" style="position: fixed; bottom: 20px; right: 20px; background: #fff; padding: 15px; border: 1px solid #ccc; box-shadow: 0 4px 6px rgba(0,0,0,0.1); z-index: 9999;">
+            <a href="/download/{slug}?image_level={image_level}&show_alt={show_alt_str}" style="background: #0056b3; color: #fff; padding: 10px 15px; text-decoration: none; font-weight: bold; border-radius: 4px;">Save for Reading (Offline HTML)</a>
+        </div>
+        """
+        ui_soup = BeautifulSoup(ui_html, 'html.parser')
+        body.append(ui_soup)
+
+    return str(soup), 200
+
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    if request.method == 'POST':
+        user_input = request.form.get('wiki_input', '').strip()
+        image_level = request.form.get('image_level', 'section_top')
+        show_alt = 'true' if request.form.get('show_alt') else 'false'
+
+        if 'wikipedia.org/wiki/' in user_input:
+            slug = user_input.split('/wiki/')[-1]
+        else:
+            slug = user_input
+        return redirect(f"/view/{slug}?image_level={image_level}&show_alt={show_alt}")
+
+    return """
+    <html>
+        <head><title>Spoken View</title></head>
+        <body style="font-family: sans-serif; max-width: 600px; margin: 40px auto; line-height: 1.6;">
+            <h1>Spoken View</h1>
+            <p>Enter an English Wikipedia article URL or exact name to generate a clutter-free, read-aloud version.</p>
+            <form method="POST">
+                <input type="text" name="wiki_input" placeholder="e.g., Bicycle or https://en.wikipedia.org/wiki/Bicycle" style="width: 100%; padding: 10px; margin-bottom: 15px;" required>
+                
+                <p style="margin-bottom: 5px; font-weight: bold;">Please select how many images to display:</p>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px;"><input type="radio" name="image_level" value="main"> Main article image only</label>
+                    <label style="display: block; margin-bottom: 5px;"><input type="radio" name="image_level" value="section_top" checked> Top image per section (always includes main image)</label>
+                    <label style="display: block; margin-bottom: 5px;"><input type="radio" name="image_level" value="all"> All images</label>
+                </div>
+                
+                <div style="margin-bottom: 20px;">
+                    <label style="font-weight: bold;"><input type="checkbox" name="show_alt" value="true" checked> Show alt text (when distinct from caption)</label>
+                </div>
+
+                <button type="submit" style="padding: 10px 20px; background: #0056b3; color: white; border: none; font-weight: bold; cursor: pointer;">Generate View</button>
+            </form>
+        </body>
+    </html>
+    """
+
+@app.route('/view/<path:slug>')
+def view_article(slug):
+    image_level = request.args.get('image_level', 'section_top')
+    show_alt = request.args.get('show_alt', 'true') == 'true'
+    
+    html_content, status_code = process_article(slug, is_download=False, image_level=image_level, show_alt=show_alt)
+    if status_code != 200:
+        return html_content, status_code
+    return Response(html_content, mimetype='text/html')
+
+@app.route('/download/<path:slug>')
+def download_article(slug):
+    image_level = request.args.get('image_level', 'section_top')
+    show_alt = request.args.get('show_alt', 'true') == 'true'
+
+    html_content, status_code = process_article(slug, is_download=True, image_level=image_level, show_alt=show_alt)
+    if status_code != 200:
+        return html_content, status_code
+    
+    return Response(
+        html_content,
+        mimetype='text/html',
+        headers={"Content-Disposition": f"attachment; filename={slug}_Spoken_View.html"}
+    )
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
