@@ -66,20 +66,17 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
     # 1. Find the main image unconditionally BEFORE structural cleanup
     main_image_node = None
     
-    # Prioritize the infobox for the main image
     infobox = soup.find('table', class_=re.compile(r'\binfobox\b'))
     if infobox:
         for file_node in infobox.find_all(attrs={'typeof': re.compile(r'mw:File')}):
             img = file_node.find('img')
             if img:
                 w = img.get('width') or img.get('data-file-width')
-                # Require at least 150px to filter out tiny icons like the Earth symbol
                 if w and str(w).isdigit() and int(w) >= 150:
                     main_image_node = file_node.extract()
                     main_image_node.name = 'figure'
                     break
 
-    # Fallback to the first large image in the document if no infobox is found
     if not main_image_node:
         for file_node in soup.find_all(attrs={'typeof': re.compile(r'mw:File')}):
             img = file_node.find('img')
@@ -94,7 +91,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
     for file_node in soup.find_all(attrs={'typeof': re.compile(r'mw:File')}):
         file_node.name = 'figure'
 
-    # 3. Strip purely decorative or unwanted structural clutter completely (DO NOT rescue figures)
+    # 3. Strip purely decorative or unwanted structural clutter completely
     destroy_entirely = [
         'IPA', 'noprint', 'reference', 'reflist', 'refbegin', 
         'hatnote', 'metadata', 'ambox', 'mbox', 'ombox', 'dmbox', 'fmbox', 
@@ -151,7 +148,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         if len(rows) >= 5:
             table.decompose()
 
-    # 7. Filter Images based on User Parameter (main_image_node is immune because it was extracted)
+    # 7. Filter Images based on User Parameter (main_image_node is immune)
     if image_level == 'main':
         for fig in soup.find_all('figure'):
             fig.decompose()
@@ -183,7 +180,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         elif tag.name == 'link' and tag.has_attr('href'):
             tag['href'] = urljoin(WIKI_ROOT_URL, tag['href'])
 
-    # 10. Format Alt Text and Captions
+    # 10. Format Alt Text, Captions, and Clearfix
     figures_to_format = soup.find_all('figure')
     if main_image_node:
         figures_to_format.append(main_image_node)
@@ -194,19 +191,41 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         alt_text = img.get('alt', '').strip() if img else ""
         caption_text = figcaption.get_text(separator=" ", strip=True) if figcaption else ""
 
-        # Filter out identical or heavily duplicated alt text (>95% similar)
+        # Logic: If no caption exists but alt text exists, promote alt text to caption
+        if not figcaption and alt_text:
+            figcaption = soup.new_tag('figcaption')
+            figcaption.string = alt_text
+            figure.append(figcaption)
+            caption_text = alt_text
+            # Clear alt text so it doesn't get rendered twice
+            alt_text = ""
+
         show_this_alt = False
-        if show_alt and alt_text:
+        if show_alt and alt_text and figcaption:
             similarity = difflib.SequenceMatcher(None, alt_text.lower(), caption_text.lower()).ratio()
             if similarity < 0.95:
                 show_this_alt = True
 
-        if not figcaption:
+        if figcaption:
+            figcaption['style'] = "display: block; background-color: #f9f9f9; padding: 12px; border-left: 5px solid #0056b3; margin-top: 15px; font-size: 1.1em;"
+            original_contents = list(figcaption.contents)
+            figcaption.clear()
+
+            cap_block = soup.new_tag('div')
             if show_this_alt:
-                figcaption = soup.new_tag('figcaption')
-                figcaption['style'] = "display: block; background-color: #f9f9f9; padding: 12px; border-left: 5px solid #0056b3; margin-top: 15px; font-size: 1.1em;"
-                figure.append(figcaption)
+                cap_block['style'] = "margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid #ddd;"
                 
+            cap_prefix = soup.new_tag('span')
+            cap_prefix.string = "CAPTION: "
+            cap_prefix['style'] = "color: #0056b3; font-weight: bold; text-transform: uppercase; margin-right: 8px;"
+            cap_block.append(cap_prefix)
+            
+            for content in original_contents:
+                cap_block.append(content)
+                
+            figcaption.append(cap_block)
+
+            if show_this_alt:
                 alt_block = soup.new_tag('div')
                 alt_prefix = soup.new_tag('span')
                 alt_prefix.string = "ALT TEXT: "
@@ -214,36 +233,12 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
                 alt_block.append(alt_prefix)
                 alt_block.append(alt_text)
                 figcaption.append(alt_block)
-            continue
-
-        figcaption['style'] = "display: block; background-color: #f9f9f9; padding: 12px; border-left: 5px solid #0056b3; margin-top: 15px; font-size: 1.1em;"
-        original_contents = list(figcaption.contents)
-        figcaption.clear()
-
-        # Build Caption Block
-        cap_block = soup.new_tag('div')
-        if show_this_alt:
-            cap_block['style'] = "margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid #ddd;"
-            
-        cap_prefix = soup.new_tag('span')
-        cap_prefix.string = "CAPTION: "
-        cap_prefix['style'] = "color: #0056b3; font-weight: bold; text-transform: uppercase; margin-right: 8px;"
-        cap_block.append(cap_prefix)
-        
-        for content in original_contents:
-            cap_block.append(content)
-            
-        figcaption.append(cap_block)
-
-        # Build Alt Block directly below the caption
-        if show_this_alt:
-            alt_block = soup.new_tag('div')
-            alt_prefix = soup.new_tag('span')
-            alt_prefix.string = "ALT TEXT: "
-            alt_prefix['style'] = "color: #0056b3; font-weight: bold; text-transform: uppercase; margin-right: 8px;"
-            alt_block.append(alt_prefix)
-            alt_block.append(alt_text)
-            figcaption.append(alt_block)
+                
+        # Inject clearfix to prevent orphaned text wrapping
+        if figure.parent:
+            clearfix = soup.new_tag('div')
+            clearfix['style'] = "clear: both;"
+            figure.insert_after(clearfix)
 
     body = soup.find('body') or soup
 
@@ -289,7 +284,7 @@ def process_article(slug, is_download=False, image_level='section_top', show_alt
         toc_container.append(toc_list)
         preamble.insert_after(toc_container)
 
-    # 13. Inject the Main Image (Floated right, below TOC)
+    # 13. Inject the Main Image
     if main_image_node:
         main_image_node['style'] = "float: right; clear: right; margin: 0 0 15px 20px; max-width: 45%;"
         if toc_container:
