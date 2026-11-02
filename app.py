@@ -1,5 +1,6 @@
 import re
 from urllib.parse import urljoin
+from datetime import datetime
 from flask import Flask, request, Response, redirect
 import requests
 from bs4 import BeautifulSoup
@@ -22,6 +23,20 @@ def process_article(slug, is_download=False):
     title_tag = soup.find('title')
     page_name = title_tag.text if title_tag else slug.replace('_', ' ')
     
+    # Extract modification timestamp for the footer
+    meta_time = soup.find('meta', property='dc:modified')
+    if meta_time and meta_time.get('content'):
+        try:
+            dt = datetime.strptime(meta_time['content'][:19], "%Y-%m-%dT%H:%M:%S")
+            date_str = dt.strftime("%B %d, %Y")
+            time_str = dt.strftime("%H:%M UTC")
+        except ValueError:
+            date_str = "[Date]"
+            time_str = "[Time]"
+    else:
+        date_str = "[Date]"
+        time_str = "[Time]"
+
     # 0. Adjust Title tag to prepend "SpokenView:" and remove <base> tag
     base_tag = soup.find('base')
     if base_tag:
@@ -57,11 +72,28 @@ def process_article(slug, is_download=False):
         if el:
             el.decompose()
 
-    # 2. Strip unwanted sections (See also, Notes, References, External links, Further reading)
+    # 2. Number headings sequentially to match Wikipedia's native structure
+    h2_data = []
+    h2_tags = soup.find_all('h2')
+    for idx, heading in enumerate(h2_tags, start=1):
+        original_text = heading.get_text().strip()
+        if not heading.get('id'):
+            heading['id'] = f"spoken-section-{idx}"
+            
+        h2_data.append({
+            'tag': heading,
+            'original_text': original_text,
+            'id': heading.get('id')
+        })
+        # Modify DOM to explicitly write out the section number
+        heading.string = f"Section {idx}: {original_text}"
+
+    # 3. Strip unwanted sections (See also, Notes, References, External links, Further reading)
     sections_to_remove = ['see also', 'notes', 'references', 'external links', 'further reading']
-    for heading in soup.find_all(['h2', 'h3', 'h4']):
-        heading_text = heading.get_text().strip().lower()
-        if heading_text in sections_to_remove:
+    for data in h2_data:
+        heading = data['tag']
+        heading_lower = data['original_text'].lower()
+        if heading_lower in sections_to_remove:
             parent_section = heading.find_parent('section')
             if parent_section:
                 parent_section.decompose()
@@ -73,18 +105,18 @@ def process_article(slug, is_download=False):
                     curr.decompose()
                     curr = next_el
 
-    # 3. Table Heuristic: Remove complex tables (>= 5 rows), keep simple lists
+    # 4. Table Heuristic: Remove complex tables (>= 5 rows), keep simple lists
     for table in soup.find_all('table'):
         rows = table.find_all('tr')
         if len(rows) >= 5:
             table.decompose()
 
-    # 4. Strip specific identifier links (ISBN, PMID, etc.) 
+    # 5. Strip specific identifier links (ISBN, PMID, etc.) 
     for a in soup.find_all('a', href=True):
         if '(identifier)' in a['href'] or 'Special:BookSources' in a['href']:
             a.decompose()
 
-    # 5. Absolutize URLs for offline viewing and live-served images
+    # 6. Absolutize URLs for offline viewing and live-served images
     for tag in soup.find_all(['a', 'img', 'link']):
         if tag.name == 'a' and tag.has_attr('href'):
             tag['href'] = urljoin(WIKI_ROOT_URL, tag['href'])
@@ -95,7 +127,7 @@ def process_article(slug, is_download=False):
         elif tag.name == 'link' and tag.has_attr('href'):
             tag['href'] = urljoin(WIKI_ROOT_URL, tag['href'])
 
-    # 6. Make Captions Prominent for TTS / Human Readers
+    # 7. Make Captions Prominent for TTS / Human Readers
     for figure in soup.find_all('figure'):
         figcaption = figure.find('figcaption')
         if figcaption:
@@ -107,15 +139,15 @@ def process_article(slug, is_download=False):
 
     body = soup.find('body') or soup
 
-    # 7. Inject Spoken Wikipedia preamble
+    # 8. Inject Spoken Wikipedia preamble
     preamble = soup.new_tag('p')
     preamble['style'] = "font-style: italic; font-weight: bold; font-size: 1.2em; background: #e0f2fe; padding: 15px; border-radius: 5px; margin-bottom: 25px;"
     preamble.string = f"This is the Spoken Wikipedia article on {page_name} read aloud by Wikipedia user __________"
     body.insert(0, preamble)
 
-    # 8. Generate Top-Level Table of Contents (H2 only)
-    h2_tags = soup.find_all('h2')
-    if h2_tags:
+    # 9. Generate Top-Level Table of Contents (H2 only)
+    surviving_h2s = soup.find_all('h2')
+    if surviving_h2s:
         toc_container = soup.new_tag('div')
         toc_container['style'] = "background: #f8f9fa; padding: 15px; margin: 20px 0; border: 1px solid #a2a9b1; border-radius: 2px;"
         
@@ -127,17 +159,21 @@ def process_article(slug, is_download=False):
         toc_list = soup.new_tag('ul')
         toc_list['style'] = "list-style-type: none; padding-left: 0; margin-bottom: 0;"
         
-        for idx, h2 in enumerate(h2_tags):
-            if not h2.get('id'):
-                h2['id'] = f"spoken-section-{idx}"
-            
+        for h2 in surviving_h2s:
             li = soup.new_tag('li')
             li['style'] = "margin-bottom: 6px;"
             
             a_tag = soup.new_tag('a')
             a_tag['href'] = f"#{h2.get('id')}"
             a_tag['style'] = "text-decoration: none; color: #0645ad; font-weight: bold;"
-            a_tag.string = h2.get_text().strip()
+            
+            # Format as "1. Name" instead of "Section 1: Name" for the TOC
+            text = h2.get_text()
+            if text.startswith("Section "):
+                toc_text = text.replace("Section ", "", 1).replace(":", ".", 1)
+            else:
+                toc_text = text
+            a_tag.string = toc_text
             
             li.append(a_tag)
             toc_list.append(li)
@@ -145,13 +181,18 @@ def process_article(slug, is_download=False):
         toc_container.append(toc_list)
         preamble.insert_after(toc_container)
 
-    # 9. Inject Spoken Wikipedia outro
+    # 10. Inject Spoken Wikipedia outro and timestamp
     outro = soup.new_tag('p')
     outro['style'] = "font-style: italic; font-size: 1.1em; background: #e0f2fe; padding: 15px; border-radius: 5px; margin-top: 40px;"
     outro.string = "This recording and the underlying text are available under the Creative Commons Attribution Share Alike 4.0 license. Additional terms may apply."
     body.append(outro)
 
-    # 10. Inject base typography 
+    timestamp_footer = soup.new_tag('p')
+    timestamp_footer['style'] = "font-style: italic; font-size: 0.9em; color: #555; margin-top: 15px; border-top: 1px solid #ccc; padding-top: 10px;"
+    timestamp_footer.string = f"This page was based upon the version of the Wikipedia article {page_name} as it was on {time_str} and {date_str}."
+    body.append(timestamp_footer)
+
+    # 11. Inject base typography 
     head = soup.find('head')
     if not head:
         head = soup.new_tag('head')
@@ -165,7 +206,7 @@ def process_article(slug, is_download=False):
     """
     head.append(style)
 
-    # 11. Inject floating save button (only for live view)
+    # 12. Inject floating save button (only for live view)
     if not is_download:
         ui_html = f"""
         <div id="spoken-view-ui" style="position: fixed; bottom: 20px; right: 20px; background: #fff; padding: 15px; border: 1px solid #ccc; box-shadow: 0 4px 6px rgba(0,0,0,0.1); z-index: 9999;">
