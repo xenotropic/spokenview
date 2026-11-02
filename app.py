@@ -360,4 +360,44 @@ def index():
                 <p style="margin-bottom: 5px; font-weight: bold;">Please select how many images to display:</p>
                 <div style="margin-bottom: 15px;">
                     <label style="display: block; margin-bottom: 5px;"><input type="radio" name="image_level" value="main"> Main article image only</label>
-                    <label style="display: block; margin-bottom: 5px;"><input type="radio" name="image_level" value
+                    <label style="display: block; margin-bottom: 5px;"><input type="radio" name="image_level" value="section_top" checked> Top image per section (always includes main image)</label>
+                    <label style="display: block; margin-bottom: 5px;"><input type="radio" name="image_level" value="all"> All images</label>
+                </div>
+                
+                <div style="margin-bottom: 20px;">
+                    <label style="font-weight: bold;"><input type="checkbox" name="show_alt" value="true" checked> Show alt text (when distinct from caption)</label>
+                </div>
+
+                <button type="submit" style="padding: 10px 20px; background: #0056b3; color: white; border: none; font-weight: bold; cursor: pointer;">Generate View</button>
+            </form>
+        </body>
+    </html>
+    """
+
+@app.route('/view/<path:slug>')
+def view_article(slug):
+    image_level = request.args.get('image_level', 'section_top')
+    show_alt = request.args.get('show_alt', 'true') == 'true'
+    
+    html_content, status_code = process_article(slug, is_download=False, image_level=image_level, show_alt=show_alt)
+    if status_code != 200:
+        return html_content, status_code
+    return Response(html_content, mimetype='text/html')
+
+@app.route('/download/<path:slug>')
+def download_article(slug):
+    image_level = request.args.get('image_level', 'section_top')
+    show_alt = request.args.get('show_alt', 'true') == 'true'
+
+    html_content, status_code = process_article(slug, is_download=True, image_level=image_level, show_alt=show_alt)
+    if status_code != 200:
+        return html_content, status_code
+    
+    return Response(
+        html_content,
+        mimetype='text/html',
+        headers={"Content-Disposition": f"attachment; filename={slug}_Spoken_View.html"}
+    )
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
